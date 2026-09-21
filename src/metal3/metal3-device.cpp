@@ -287,7 +287,11 @@ namespace nvrhi::metal3
         std::lock_guard<std::mutex> lock(m_Device->m_Mutex);
         auto& retained = m_Device->m_DefaultLifetimeTrackers[uint32_t(m_Queue)]->m_CommandBuffers;
         for (auto& commandBuffer : m_CommandBuffers)
-            retained.push_back(std::move(commandBuffer));
+        {
+            const MTLCommandBufferStatus status = commandBuffer.commandBuffer.status;
+            if (status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError)
+                retained.push_back(std::move(commandBuffer));
+        }
     }
 
     Object CommandListLifetimeTracker::getNativeObject(ObjectType objectType)
@@ -297,11 +301,34 @@ namespace nvrhi::metal3
 
     void CommandListLifetimeTracker::collect()
     {
-        auto end = std::remove_if(m_CommandBuffers.begin(), m_CommandBuffers.end(), [](const TrackedCommandBuffer& tracked) {
+        m_ResourceStorageHighWaterMark = std::max(m_ResourceStorageHighWaterMark, m_CommandBuffers.size());
+        auto end = std::remove_if(m_CommandBuffers.begin(), m_CommandBuffers.end(), [this](TrackedCommandBuffer& tracked) {
             const MTLCommandBufferStatus status = tracked.commandBuffer.status;
-            return status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError;
+            if (status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError)
+                return false;
+            tracked.commandBuffer = nil;
+            tracked.bindingSets.clear();
+            tracked.buffers.clear();
+            tracked.resources.clear();
+            tracked.descriptorSnapshots.clear();
+            tracked.stateResources.clear();
+            if (m_ResourceStorage.size() < m_ResourceStorageHighWaterMark
+                && (tracked.bindingSets.capacity() || tracked.buffers.capacity() || tracked.resources.capacity()
+                    || tracked.descriptorSnapshots.capacity() || tracked.stateResources.capacity()))
+                m_ResourceStorage.push_back(std::move(tracked));
+            return true;
         });
         m_CommandBuffers.erase(end, m_CommandBuffers.end());
+    }
+
+    TrackedCommandBuffer CommandListLifetimeTracker::acquireResourceStorage()
+    {
+        collect();
+        if (m_ResourceStorage.empty())
+            return {};
+        TrackedCommandBuffer storage = std::move(m_ResourceStorage.back());
+        m_ResourceStorage.pop_back();
+        return storage;
     }
 
     void CommandListLifetimeTracker::runGarbageCollection()

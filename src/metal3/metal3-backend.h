@@ -650,10 +650,13 @@ namespace nvrhi::metal3
         friend class Device;
         friend class CommandList;
         void collect();
+        TrackedCommandBuffer acquireResourceStorage();
         Device* m_Device;
         CommandQueue m_Queue;
         bool m_IsDefault;
         std::deque<TrackedCommandBuffer> m_CommandBuffers;
+        std::vector<TrackedCommandBuffer> m_ResourceStorage;
+        size_t m_ResourceStorageHighWaterMark = 0;
     };
 
     class EventQuery : public RefCounter<IEventQuery>
@@ -867,10 +870,12 @@ namespace nvrhi::metal3
         };
         std::vector<PendingClear> m_PendingClears;
         std::vector<const void*> m_RenderEncoderWrites;
+        std::vector<const void*> m_BlitEncoderWrites;
 
         id<MTLCommandBuffer> trackedCmdBuffer = nil;
         id<MTLRenderCommandEncoder> m_RenderEncoder = nil;
         id<MTLComputeCommandEncoder> m_ComputeEncoder = nil;
+        id<MTLBlitCommandEncoder> m_BlitEncoder = nil;
         id<MTLFence> m_EncoderFence = nil;
         bool m_EncoderFenceArmed = false;
 

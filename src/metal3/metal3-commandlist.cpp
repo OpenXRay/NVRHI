@@ -1562,6 +1562,8 @@ namespace nvrhi::metal3
 
     id<MTLCommandBuffer> CommandList::getNativeCommandBuffer()
     {
+        if (m_BlitEncoder)
+            endEncoding();
         return trackedCmdBuffer;
     }
 
@@ -1723,6 +1725,12 @@ namespace nvrhi::metal3
             endEncoding(m_ComputeEncoder);
             m_ComputeEncoder = nil;
         }
+        if (m_BlitEncoder)
+        {
+            endEncoding(m_BlitEncoder);
+            m_BlitEncoder = nil;
+        }
+        m_BlitEncoderWrites.clear();
         m_BindingStatesDirty = true;
         m_ArgumentTablesDirty = false;
         m_RenderEncoderWrites.clear();
@@ -1752,6 +1760,7 @@ namespace nvrhi::metal3
             return;
         }
 
+        const bool wasSubmitted = m_RecordingState == RecordingState::Submitted;
         trackedCmdBuffer = nil;
         m_EncoderFence = m_Device->m_Queues[uint32_t(m_Desc.queueType)].fence;
         m_EncoderFenceArmed = m_Device->m_Queues[uint32_t(m_Desc.queueType)].fenceArmed;
@@ -1796,18 +1805,44 @@ namespace nvrhi::metal3
         m_ReferencedDescriptorSnapshots.clear();
         m_ReferencedStateResources.clear();
         m_ReferencedMappableBuffers.clear();
-        m_StateTracker = CommandListResourceStateTracker(m_Context.messageCallback);
+        if (wasSubmitted)
+        {
+            TrackedCommandBuffer storage = m_LifetimeTracker->acquireResourceStorage();
+            m_ReferencedBindingSets.swap(storage.bindingSets);
+            m_ReferencedNativeBuffers.swap(storage.buffers);
+            m_ReferencedNativeResources.swap(storage.resources);
+            m_ReferencedDescriptorSnapshots.swap(storage.descriptorSnapshots);
+            m_ReferencedStateResources.swap(storage.stateResources);
+        }
+        else
+            m_StateTracker = CommandListResourceStateTracker(m_Context.messageCallback);
+        auto resetAllocations = [](auto& cache) {
+            const size_t live = std::count_if(cache.begin(), cache.end(), [](const auto& entry) {
+                return entry.second.allocation.buffer != nil;
+            });
+            const bool prune = cache.size() > 2 * live + 1024;
+            for (auto it = cache.begin(); it != cache.end();)
+            {
+                if (prune && !it->second.allocation.buffer)
+                    it = cache.erase(it);
+                else
+                {
+                    it->second = {};
+                    ++it;
+                }
+            }
+        };
         m_PushConstantSize = 0;
         m_BindingStatesDirty = true;
         m_ArgumentTablesDirty = false;
-        m_ArgumentTableCache.clear();
+        resetAllocations(m_ArgumentTableCache);
         m_DebugGroups.clear();
         m_UploadManager.beginCommandBuffer();
         m_ArgumentTableManager.beginCommandBuffer();
         m_TransientIndirectResources.beginCommandBuffer();
         m_ArgumentTableAllocationCount = 0;
         m_ArgumentTablePageCountAtOpen = m_ArgumentTableManager.getChunkCount();
-        m_VolatileBufferAllocations.clear();
+        resetAllocations(m_VolatileBufferAllocations);
         m_VolatileBufferWriteVersion = 0;
         m_CurrentGraphicsStateValid = false;
         m_CurrentComputeStateValid = false;
@@ -1818,6 +1853,7 @@ namespace nvrhi::metal3
         m_GeometryEmulationVertexBuffersOffset = 0;
         m_RenderEncoder = nil;
         m_ComputeEncoder = nil;
+        m_BlitEncoder = nil;
     }
     void CommandList::close()
     {
@@ -2221,7 +2257,7 @@ namespace nvrhi::metal3
             if (destOffsetBytes != 0 || dataSize != buffer->desc.byteSize)
             {
                 auto previous = m_VolatileBufferAllocations.find(buffer);
-                if (previous != m_VolatileBufferAllocations.end())
+                if (previous != m_VolatileBufferAllocations.end() && previous->second.allocation.buffer)
                     std::memcpy(allocation.cpuAddress, previous->second.allocation.cpuAddress, buffer->desc.byteSize);
                 else
                     std::memset(allocation.cpuAddress, 0, buffer->desc.byteSize);
@@ -2247,15 +2283,21 @@ namespace nvrhi::metal3
         memcpy(upload.cpuAddress, data, dataSize);
         referenceBuffer(buffer);
 
-        endEncoding();
-        id<MTLBlitCommandEncoder> blit = beginBlitEncoder();
-        beginEncoding(blit, __func__);
-        [blit copyFromBuffer:upload.buffer
+        const void* destination = (__bridge const void*)buffer->buffer;
+        if (m_BlitEncoder && std::find(m_BlitEncoderWrites.begin(), m_BlitEncoderWrites.end(), destination) !=
+            m_BlitEncoderWrites.end())
+            endEncoding();
+        if (!m_BlitEncoder)
+        {
+            m_BlitEncoder = beginBlitEncoder();
+            beginEncoding(m_BlitEncoder, __func__);
+        }
+        [m_BlitEncoder copyFromBuffer:upload.buffer
                 sourceOffset:upload.offset
                     toBuffer:buffer->buffer
            destinationOffset:NSUInteger(destOffsetBytes)
                         size:NSUInteger(dataSize)];
-        endEncoding(blit);
+        m_BlitEncoderWrites.push_back(destination);
     }
 
     void CommandList::clearBufferUInt(IBuffer* b, uint32_t clearValue)
@@ -3719,7 +3761,7 @@ namespace nvrhi::metal3
         auto cached = m_ArgumentTableCache.find(key);
         if (cached != m_ArgumentTableCache.end())
         {
-            if (cached->second.volatileBufferVersion != volatileBufferVersion)
+            if (!cached->second.allocation.buffer || cached->second.volatileBufferVersion != volatileBufferVersion)
             {
                 allocation = createArgumentTable(plan, bindingSets);
                 if (!allocation.buffer)
