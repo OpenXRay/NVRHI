@@ -561,6 +561,7 @@ namespace nvrhi::metal3
         bool built = false;
         uint32_t buildSerial = 0;
         MTLAccelerationStructureUsage builtUsage = MTLAccelerationStructureUsageNone;
+        MTLAccelerationStructureSizes builtSizes = {};
         size_t builtInstanceCount = 0;
         std::vector<GeometryState> builtGeometry;
         std::vector<id<MTLBuffer>> builtGeometryBuffers;
@@ -903,6 +904,7 @@ namespace nvrhi::metal3
         id<MTLRenderCommandEncoder> m_RenderEncoder = nil;
         id<MTLComputeCommandEncoder> m_ComputeEncoder = nil;
         id<MTLBlitCommandEncoder> m_BlitEncoder = nil;
+        id<MTLAccelerationStructureCommandEncoder> m_AccelEncoder = nil;
         id<MTLFence> m_EncoderFence = nil;
         bool m_EncoderFenceArmed = false;
 
@@ -944,6 +946,7 @@ namespace nvrhi::metal3
         void encodeStandaloneClear(const PendingClear& clear);
         void rebindArgumentTables();
         void annotateEncoder(id<MTLCommandEncoder> encoder, const char* operation);
+        id<MTLAccelerationStructureCommandEncoder> getOrCreateAccelEncoder(const char* operation);
         bool encodeTimerBoundary(TimerQuery* query, bool ending);
         void bindGraphicsBuffer(id<MTLRenderCommandEncoder> encoder, id<MTLBuffer> buffer,
             NSUInteger offset, NSUInteger index, MTLRenderStages stages);

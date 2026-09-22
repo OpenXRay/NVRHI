@@ -97,7 +97,9 @@ namespace nvrhi::metal3
         const auto& bufferBarriers = m_StateTracker.getBufferBarriers();
         if (textureBarriers.empty() && bufferBarriers.empty())
             return;
-        if (m_ComputeEncoder)
+        if (m_AccelEncoder)
+            endEncoding();
+        else if (m_ComputeEncoder)
         {
             NSUInteger scope = 0;
             if (!bufferBarriers.empty())

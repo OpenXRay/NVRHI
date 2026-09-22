@@ -276,9 +276,7 @@ namespace nvrhi::metal3
         {
             const AccelStruct::GeometryState& a = cached[i];
             const AccelStruct::GeometryState& b = requested[i];
-            if (a.vertexBuffer != b.vertexBuffer || a.indexBuffer != b.indexBuffer ||
-                a.vertexOffset != b.vertexOffset || a.indexOffset != b.indexOffset ||
-                a.vertexCount != b.vertexCount || a.indexCount != b.indexCount ||
+            if (a.vertexCount != b.vertexCount || a.indexCount != b.indexCount ||
                 a.vertexStride != b.vertexStride || a.vertexFormat != b.vertexFormat ||
                 a.indexFormat != b.indexFormat || a.geometryFlags != b.geometryFlags ||
                 a.indexed != b.indexed || a.useTransform != b.useTransform)
@@ -338,24 +336,24 @@ namespace nvrhi::metal3
         if (!as || !as->accelStruct || !pGeometries || numGeometries == 0)
             return;
 
-        endEncoding();
-        flushPendingClears();
-
         const bool performUpdate = (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != rt::AccelStructBuildFlags::None;
         rt::AccelStructBuildFlags effectiveFlags = buildFlags;
         if (as->allowUpdate)
             effectiveFlags = effectiveFlags | rt::AccelStructBuildFlags::AllowUpdate;
 
         MTLAccelerationStructureDescriptor* descriptor = buildDescriptorForBLAS(pGeometries, numGeometries, effectiveFlags);
-        MTLAccelerationStructureSizes sizes = [m_Context.device accelerationStructureSizesWithDescriptor:descriptor];
 
         std::vector<AccelStruct::GeometryState> geometry;
         std::vector<id<MTLBuffer>> geometryBuffers;
         captureGeometryState(pGeometries, numGeometries, geometry, geometryBuffers);
 
-        if (performUpdate && as->allowUpdate && as->built && !as->allowCompaction &&
-            as->builtUsage == descriptor.usage && sizes.accelerationStructureSize <= as->accelStruct.size &&
-            geometryLayoutMatches(as->builtGeometry, geometry))
+        const bool layoutMatches = as->built && as->builtUsage == descriptor.usage &&
+            geometryLayoutMatches(as->builtGeometry, geometry);
+        const MTLAccelerationStructureSizes sizes = layoutMatches ? as->builtSizes :
+            [m_Context.device accelerationStructureSizesWithDescriptor:descriptor];
+
+        if (performUpdate && as->allowUpdate && layoutMatches && !as->allowCompaction &&
+            sizes.accelerationStructureSize <= as->accelStruct.size)
         {
             if (@available(macOS 13.0, *))
             {
@@ -368,21 +366,17 @@ namespace nvrhi::metal3
                     return;
                 }
 
-                id<MTLAccelerationStructureCommandEncoder> encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+                id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
                 if (!encoder)
-                {
-                    m_RecordingFailed = true;
-                    m_Context.error("[nvrhi] Failed to create Metal BLAS refit encoder.");
                     return;
-                }
-                beginEncoding(encoder, "refitBLAS");
                 [encoder refitAccelerationStructure:as->accelStruct
                                          descriptor:descriptor
                                         destination:as->accelStruct
                                       scratchBuffer:refitScratch.buffer
                                 scratchBufferOffset:refitScratch.offset
                                             options:MTLAccelerationStructureRefitOptionVertexData];
-                endEncoding(encoder);
+                as->builtGeometry = std::move(geometry);
+                as->builtGeometryBuffers = std::move(geometryBuffers);
                 m_ReferencedNativeResources.push_back(as->accelStruct);
                 return;
             }
@@ -416,14 +410,9 @@ namespace nvrhi::metal3
             return;
         }
 
-        id<MTLAccelerationStructureCommandEncoder> encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+        id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
         if (!encoder)
-        {
-            m_RecordingFailed = true;
-            m_Context.error("[nvrhi] Failed to create Metal BLAS build encoder.");
             return;
-        }
-        beginEncoding(encoder, "buildBLAS");
         [encoder buildAccelerationStructure:as->accelStruct
                                  descriptor:descriptor
                               scratchBuffer:scratch.buffer
@@ -444,11 +433,11 @@ namespace nvrhi::metal3
         }
         else
             ++as->buildSerial;
-        endEncoding(encoder);
 
         as->builtGeometry = std::move(geometry);
         as->builtGeometryBuffers = std::move(geometryBuffers);
         as->builtUsage = descriptor.usage;
+        as->builtSizes = sizes;
         as->built = true;
         m_ReferencedNativeResources.push_back(as->accelStruct);
     }
@@ -460,7 +449,6 @@ namespace nvrhi::metal3
         if (completed.empty())
             return;
 
-        id<MTLAccelerationStructureCommandEncoder> encoder = nil;
         for (Device::PendingCompaction& pending : completed)
         {
             AccelStruct* as = pending.accelStruct;
@@ -474,19 +462,9 @@ namespace nvrhi::metal3
                 continue;
             if (!as->desc.debugName.empty())
                 compact.label = [NSString stringWithUTF8String:as->desc.debugName.c_str()];
+            id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
             if (!encoder)
-            {
-                endEncoding();
-                flushPendingClears();
-                encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
-                if (!encoder)
-                {
-                    m_RecordingFailed = true;
-                    m_Context.error("[nvrhi] Failed to create Metal BLAS compaction encoder.");
-                    return;
-                }
-                beginEncoding(encoder, "compactBLAS");
-            }
+                return;
             [encoder copyAndCompactAccelerationStructure:as->accelStruct toAccelerationStructure:compact];
             m_ReferencedNativeResources.push_back(as->accelStruct);
             m_ReferencedNativeResources.push_back(compact);
@@ -495,8 +473,6 @@ namespace nvrhi::metal3
             as->residency->add(compact);
             as->compacted = true;
         }
-        if (encoder)
-            endEncoding(encoder);
     }
 
     void CommandList::buildTopLevelAccelStruct(rt::IAccelStruct* abstractAs,
@@ -506,9 +482,6 @@ namespace nvrhi::metal3
         auto* as = static_cast<AccelStruct*>(abstractAs);
         if (!as || !as->accelStruct || !pInstances || numInstances == 0)
             return;
-
-        endEncoding();
-        flushPendingClears();
 
         const bool performUpdate = (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != rt::AccelStructBuildFlags::None;
         rt::AccelStructBuildFlags effectiveFlags = buildFlags;
@@ -617,21 +590,15 @@ namespace nvrhi::metal3
                     return;
                 }
 
-                id<MTLAccelerationStructureCommandEncoder> encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+                id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
                 if (!encoder)
-                {
-                    m_RecordingFailed = true;
-                    m_Context.error("[nvrhi] Failed to create Metal TLAS refit encoder.");
                     return;
-                }
-                beginEncoding(encoder, "refitTLAS");
                 [encoder refitAccelerationStructure:as->accelStruct
                                          descriptor:tlasDesc
                                         destination:as->accelStruct
                                       scratchBuffer:refitScratch.buffer
                                 scratchBufferOffset:refitScratch.offset
                                             options:static_cast<MTLAccelerationStructureRefitOptions>(0)];
-                endEncoding(encoder);
                 refitted = true;
             }
         }
@@ -647,19 +614,13 @@ namespace nvrhi::metal3
                 return;
             }
 
-            id<MTLAccelerationStructureCommandEncoder> encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+            id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
             if (!encoder)
-            {
-                m_RecordingFailed = true;
-                m_Context.error("[nvrhi] Failed to create Metal TLAS build encoder.");
                 return;
-            }
-            beginEncoding(encoder, "buildTLAS");
             [encoder buildAccelerationStructure:as->accelStruct
                                      descriptor:tlasDesc
                                   scratchBuffer:scratch.buffer
                             scratchBufferOffset:scratch.offset];
-            endEncoding(encoder);
 
             as->builtBottomLevelAS = blasReferences;
             as->builtInstanceCount = numInstances;
@@ -725,12 +686,10 @@ namespace nvrhi::metal3
         auto* src = static_cast<AccelStruct*>(source);
         if (!dst || !src || !dst->accelStruct || !src->accelStruct)
             return;
-        endEncoding();
-        flushPendingClears();
-        id<MTLAccelerationStructureCommandEncoder> encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
-        beginEncoding(encoder, "copyAccelStruct");
+        id<MTLAccelerationStructureCommandEncoder> encoder = getOrCreateAccelEncoder("accelerationStructures");
+        if (!encoder)
+            return;
         [encoder copyAccelerationStructure:src->accelStruct toAccelerationStructure:dst->accelStruct];
-        endEncoding(encoder);
         resetUpdateState(dst);
         dst->builtGeometryBuffers = src->builtGeometryBuffers;
         dst->builtBottomLevelAS = src->builtBottomLevelAS;

@@ -1730,6 +1730,11 @@ namespace nvrhi::metal3
             endEncoding(m_BlitEncoder);
             m_BlitEncoder = nil;
         }
+        if (m_AccelEncoder)
+        {
+            endEncoding(m_AccelEncoder);
+            m_AccelEncoder = nil;
+        }
         m_BlitEncoderWrites.clear();
         m_BindingStatesDirty = true;
         m_ArgumentTablesDirty = false;
@@ -1737,6 +1742,23 @@ namespace nvrhi::metal3
 #if defined(NVRHI_METAL3_WITH_TRACY) && defined(TRACY_ENABLE)
         m_TracyEncoderScope.reset();
 #endif
+    }
+
+    id<MTLAccelerationStructureCommandEncoder> CommandList::getOrCreateAccelEncoder(const char* operation)
+    {
+        if (m_AccelEncoder)
+            return m_AccelEncoder;
+        endEncoding();
+        flushPendingClears();
+        m_AccelEncoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+        if (!m_AccelEncoder)
+        {
+            m_RecordingFailed = true;
+            m_Context.error("[nvrhi] Failed to create Metal acceleration structure encoder.");
+            return nil;
+        }
+        beginEncoding(m_AccelEncoder, operation);
+        return m_AccelEncoder;
     }
 
     void CommandList::unsupported(const char* operation)
@@ -1854,6 +1876,7 @@ namespace nvrhi::metal3
         m_RenderEncoder = nil;
         m_ComputeEncoder = nil;
         m_BlitEncoder = nil;
+        m_AccelEncoder = nil;
     }
     void CommandList::close()
     {
