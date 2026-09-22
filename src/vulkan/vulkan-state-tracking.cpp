@@ -268,6 +268,11 @@ namespace nvrhi::vulkan
         {
             ResourceStateMapping before = convertResourceState(barrier.stateBefore, false);
             ResourceStateMapping after = convertResourceState(barrier.stateAfter, false);
+            if (!m_Context.extensions.KHR_ray_tracing_pipeline)
+            {
+                before.stageFlags &= ~vk::PipelineStageFlagBits2::eRayTracingShaderKHR;
+                after.stageFlags &= ~vk::PipelineStageFlagBits2::eRayTracingShaderKHR;
+            }
 
             Buffer* buffer = static_cast<Buffer*>(barrier.buffer);
 
