@@ -359,6 +359,12 @@ namespace nvrhi::vulkan
             return true;
         case Feature::RayTracingAccelStruct:
             return m_Context.extensions.KHR_acceleration_structure;
+        case Feature::RayTracingCompaction:
+#ifdef NVRHI_WITH_RTXMU
+            return m_Context.extensions.KHR_acceleration_structure;
+#else
+            return false;
+#endif
         case Feature::RayTracingPipeline:
             return m_Context.extensions.KHR_ray_tracing_pipeline;
         case Feature::RayTracingOpacityMicromap:

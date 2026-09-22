@@ -820,7 +820,7 @@ namespace nvrhi::d3d12
         Object getNativeObject(ObjectType objectType) override;
 
         const rt::AccelStructDesc& getDesc() const override { return desc; }
-        bool isCompacted() const override { return compacted; }
+        bool isCompacted() const override;
         uint64_t getDeviceAddress() const override;
         
     private:

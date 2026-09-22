@@ -134,8 +134,45 @@ namespace nvrhi::metal3
 
     MemoryRequirements Device::getAccelStructMemoryRequirements(rt::IAccelStruct* abstractAs)
     {
-        (void)abstractAs;
-        return MemoryRequirements{};
+        auto* as = static_cast<AccelStruct*>(abstractAs);
+        MemoryRequirements requirements{};
+        if (as && as->accelStruct)
+        {
+            requirements.size = as->accelStruct.size;
+            requirements.alignment = 256;
+        }
+        return requirements;
+    }
+
+    void Device::queueCompaction(AccelStruct* as, id<MTLBuffer> sizeBuffer, id<MTLCommandBuffer> buildCommandBuffer)
+    {
+        std::lock_guard<std::mutex> lock(m_CompactionMutex);
+        PendingCompaction pending;
+        pending.accelStruct = as;
+        pending.sizeBuffer = sizeBuffer;
+        pending.buildCommandBuffer = buildCommandBuffer;
+        pending.buildSerial = as->buildSerial;
+        m_PendingCompactions.push_back(std::move(pending));
+    }
+
+    void Device::takeCompletedCompactions(std::vector<PendingCompaction>& completed)
+    {
+        std::lock_guard<std::mutex> lock(m_CompactionMutex);
+        for (size_t i = 0; i < m_PendingCompactions.size();)
+        {
+            PendingCompaction& pending = m_PendingCompactions[i];
+            const MTLCommandBufferStatus status = pending.buildCommandBuffer ? pending.buildCommandBuffer.status
+                : MTLCommandBufferStatusError;
+            if (status == MTLCommandBufferStatusCompleted)
+            {
+                completed.push_back(std::move(pending));
+                m_PendingCompactions.erase(m_PendingCompactions.begin() + i);
+            }
+            else if (status == MTLCommandBufferStatusError)
+                m_PendingCompactions.erase(m_PendingCompactions.begin() + i);
+            else
+                ++i;
+        }
     }
 
     bool Device::bindAccelStructMemory(rt::IAccelStruct* as, IHeap* heap, uint64_t offset)
@@ -367,6 +404,7 @@ namespace nvrhi::metal3
             as->accelStruct = replacement;
             as->residency->add(replacement);
             resetUpdateState(as);
+            as->compacted = false;
         }
 
         TransientBufferAllocation scratch = m_TransientIndirectResources.allocatePrivate(
@@ -392,14 +430,20 @@ namespace nvrhi::metal3
                         scratchBufferOffset:scratch.offset];
         if (as->allowCompaction)
         {
-            TransientBufferAllocation compactedSizeBuffer = m_TransientIndirectResources.allocateShared(sizeof(uint32_t), 4);
-            if (compactedSizeBuffer.buffer)
+            id<MTLBuffer> compactedSizeBuffer = [m_Context.device newBufferWithLength:sizeof(uint32_t)
+                options:MTLResourceStorageModeShared];
+            if (compactedSizeBuffer)
             {
                 [encoder writeCompactedAccelerationStructureSize:as->accelStruct
-                                                       toBuffer:compactedSizeBuffer.buffer
-                                                         offset:compactedSizeBuffer.offset];
+                                                       toBuffer:compactedSizeBuffer
+                                                         offset:0];
+                m_ReferencedNativeBuffers.push_back(compactedSizeBuffer);
+                ++as->buildSerial;
+                m_Device->queueCompaction(as, compactedSizeBuffer, trackedCmdBuffer);
             }
         }
+        else
+            ++as->buildSerial;
         endEncoding(encoder);
 
         as->builtGeometry = std::move(geometry);
@@ -411,6 +455,48 @@ namespace nvrhi::metal3
 
     void CommandList::compactBottomLevelAccelStructs()
     {
+        std::vector<Device::PendingCompaction> completed;
+        m_Device->takeCompletedCompactions(completed);
+        if (completed.empty())
+            return;
+
+        id<MTLAccelerationStructureCommandEncoder> encoder = nil;
+        for (Device::PendingCompaction& pending : completed)
+        {
+            AccelStruct* as = pending.accelStruct;
+            if (!as || !as->accelStruct || as->compacted || as->buildSerial != pending.buildSerial || !pending.sizeBuffer)
+                continue;
+            const uint32_t compactedSize = *static_cast<const uint32_t*>(pending.sizeBuffer.contents);
+            if (compactedSize == 0 || NSUInteger(compactedSize) >= as->accelStruct.size)
+                continue;
+            id<MTLAccelerationStructure> compact = [m_Context.device newAccelerationStructureWithSize:compactedSize];
+            if (!compact)
+                continue;
+            if (!as->desc.debugName.empty())
+                compact.label = [NSString stringWithUTF8String:as->desc.debugName.c_str()];
+            if (!encoder)
+            {
+                endEncoding();
+                flushPendingClears();
+                encoder = [trackedCmdBuffer accelerationStructureCommandEncoder];
+                if (!encoder)
+                {
+                    m_RecordingFailed = true;
+                    m_Context.error("[nvrhi] Failed to create Metal BLAS compaction encoder.");
+                    return;
+                }
+                beginEncoding(encoder, "compactBLAS");
+            }
+            [encoder copyAndCompactAccelerationStructure:as->accelStruct toAccelerationStructure:compact];
+            m_ReferencedNativeResources.push_back(as->accelStruct);
+            m_ReferencedNativeResources.push_back(compact);
+            as->residency->remove(as->accelStruct);
+            as->accelStruct = compact;
+            as->residency->add(compact);
+            as->compacted = true;
+        }
+        if (encoder)
+            endEncoding(encoder);
     }
 
     void CommandList::buildTopLevelAccelStruct(rt::IAccelStruct* abstractAs,

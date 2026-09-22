@@ -662,6 +662,7 @@ namespace nvrhi::metal3
             return true;
         case Feature::RayTracingAccelStruct:
         case Feature::RayQuery:
+        case Feature::RayTracingCompaction:
             return [m_Context.device supportsRaytracing];
         case Feature::BufferInt64Atomics:
             return [m_Context.device supportsFamily:MTLGPUFamilyApple9]

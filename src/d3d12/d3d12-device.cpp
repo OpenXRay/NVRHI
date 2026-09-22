@@ -778,6 +778,12 @@ namespace nvrhi::d3d12
             return m_SinglePassStereoSupported;
         case Feature::RayTracingAccelStruct:
             return m_RayTracingSupported;
+        case Feature::RayTracingCompaction:
+#ifdef NVRHI_WITH_RTXMU
+            return m_RayTracingSupported;
+#else
+            return false;
+#endif
         case Feature::RayTracingPipeline:
             return m_RayTracingSupported;
         case Feature::RayTracingOpacityMicromap:

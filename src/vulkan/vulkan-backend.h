@@ -1059,7 +1059,7 @@ namespace nvrhi::vulkan
 
         Object getNativeObject(ObjectType objectType) override;
         const rt::AccelStructDesc& getDesc() const override { return desc; }
-        bool isCompacted() const override { return compacted; }
+        bool isCompacted() const override;
         uint64_t getDeviceAddress() const override;
 
     private:

@@ -559,6 +559,7 @@ namespace nvrhi::metal3
         bool allowCompaction = false;
         bool allowUpdate = false;
         bool built = false;
+        uint32_t buildSerial = 0;
         MTLAccelerationStructureUsage builtUsage = MTLAccelerationStructureUsageNone;
         size_t builtInstanceCount = 0;
         std::vector<GeometryState> builtGeometry;
@@ -1126,6 +1127,19 @@ namespace nvrhi::metal3
             bool fenceArmed = false;
             std::vector<std::pair<id<MTLEvent>, uint64_t>> pendingWaits;
         };
+
+        struct PendingCompaction
+        {
+            RefCountPtr<AccelStruct> accelStruct;
+            id<MTLBuffer> sizeBuffer = nil;
+            id<MTLCommandBuffer> buildCommandBuffer = nil;
+            uint32_t buildSerial = 0;
+        };
+
+        void queueCompaction(AccelStruct* as, id<MTLBuffer> sizeBuffer, id<MTLCommandBuffer> buildCommandBuffer);
+        void takeCompletedCompactions(std::vector<PendingCompaction>& completed);
+        std::mutex m_CompactionMutex;
+        std::vector<PendingCompaction> m_PendingCompactions;
 
         void updateCompletedSubmissions();
         bool submissionsSucceeded(const std::array<uint64_t, uint32_t(CommandQueue::Count)>& submissions) const;

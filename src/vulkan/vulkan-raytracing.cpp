@@ -1219,6 +1219,15 @@ namespace nvrhi::vulkan
         return getBufferAddress(dataBuffer, 0).deviceAddress;
     }
 
+    bool AccelStruct::isCompacted() const
+    {
+#ifdef NVRHI_WITH_RTXMU
+        if (!desc.isTopLevel && rtxmuId != ~0ull)
+            return m_Context.rtxMemUtil->GetCompactionComplete(rtxmuId);
+#endif
+        return compacted;
+    }
+
     OpacityMicromap::~OpacityMicromap()
     {
     }

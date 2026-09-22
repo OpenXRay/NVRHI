@@ -482,6 +482,15 @@ namespace nvrhi::d3d12
         return dataBuffer->gpuVA;
     }
 
+    bool AccelStruct::isCompacted() const
+    {
+#ifdef NVRHI_WITH_RTXMU
+        if (!desc.isTopLevel && rtxmuId != ~0ull)
+            return m_Context.rtxMemUtil->GetCompactionComplete(rtxmuId);
+#endif
+        return compacted;
+    }
+
 #if NVRHI_WITH_NVAPI_OPACITY_MICROMAP
     static const NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_USAGE_COUNT* CastToUsageCount(const nvrhi::rt::OpacityMicromapUsageCount* desc)
     {
