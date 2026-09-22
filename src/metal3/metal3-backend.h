@@ -532,6 +532,24 @@ namespace nvrhi::metal3
     class AccelStruct : public RefCounter<rt::IAccelStruct>
     {
     public:
+        class GeometryState
+        {
+        public:
+            const void* vertexBuffer = nullptr;
+            const void* indexBuffer = nullptr;
+            uint64_t vertexOffset = 0;
+            uint64_t indexOffset = 0;
+            uint64_t vertexCount = 0;
+            uint64_t indexCount = 0;
+            uint32_t vertexStride = 0;
+            uint32_t vertexFormat = 0;
+            uint32_t indexFormat = 0;
+            uint32_t geometryFlags = 0;
+            bool indexed = false;
+            bool useTransform = false;
+            rt::AffineTransform transform{};
+        };
+
         rt::AccelStructDesc desc;
         id<MTLAccelerationStructure> accelStruct = nil;
         id<MTLBuffer> gpuHeaderBuffer = nil;
@@ -539,6 +557,14 @@ namespace nvrhi::metal3
         std::shared_ptr<ResidencyRegistry> residency;
         bool compacted = false;
         bool allowCompaction = false;
+        bool allowUpdate = false;
+        bool built = false;
+        MTLAccelerationStructureUsage builtUsage = MTLAccelerationStructureUsageNone;
+        size_t builtInstanceCount = 0;
+        std::vector<GeometryState> builtGeometry;
+        std::vector<id<MTLBuffer>> builtGeometryBuffers;
+        std::vector<id<MTLAccelerationStructure>> builtBottomLevelAS;
+        std::vector<MTLAccelerationStructureUserIDInstanceDescriptor> builtInstances;
         ~AccelStruct() override;
         const rt::AccelStructDesc& getDesc() const override { return desc; }
         bool isCompacted() const override { return compacted; }
