@@ -1567,6 +1567,19 @@ namespace nvrhi::metal3
         return trackedCmdBuffer;
     }
 
+    void CommandList::encodeExternal(void (^encode)(id<MTLCommandBuffer> commandBuffer, id<MTLFence> fence))
+    {
+        if (!encode || m_RecordingState != RecordingState::Open || !trackedCmdBuffer)
+            return;
+        endEncoding();
+        flushPendingClears();
+        m_StateTracker.clearBarriers();
+        encode(trackedCmdBuffer, m_EncoderFence);
+        if (m_EncoderFence)
+            m_EncoderFenceArmed = true;
+        m_BindingStatesDirty = true;
+    }
+
     void CommandList::setTracyGpuScope(const char* name, const char* file, const char* function, uint32_t line, void* context)
     {
         m_TracyGpuScope.name = name;

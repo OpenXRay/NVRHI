@@ -36,6 +36,7 @@ namespace nvrhi::metal3
     {
     public:
         virtual id<MTLCommandBuffer> getNativeCommandBuffer() = 0;
+        virtual void encodeExternal(void (^encode)(id<MTLCommandBuffer> commandBuffer, id<MTLFence> fence)) = 0;
         virtual void setTracyGpuScope(const char* name, const char* file, const char* function, uint32_t line, void* context) = 0;
         virtual void clearTracyGpuScope() = 0;
     };

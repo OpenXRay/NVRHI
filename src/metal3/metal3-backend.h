@@ -812,6 +812,7 @@ namespace nvrhi::metal3
 
         // Metal3 specific methods
         id<MTLCommandBuffer> getNativeCommandBuffer() override;
+        void encodeExternal(void (^encode)(id<MTLCommandBuffer> commandBuffer, id<MTLFence> fence)) override;
         void setTracyGpuScope(const char* name, const char* file, const char* function, uint32_t line, void* context) override;
         void clearTracyGpuScope() override;
     private:
