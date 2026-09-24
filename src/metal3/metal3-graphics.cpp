@@ -356,7 +356,7 @@ namespace nvrhi::metal3
             }
 
             applyFramebufferFormats(pd, fbinfo, desc.renderState.blendState);
-            nativePipeline = [m_Context.device newRenderPipelineStateWithDescriptor:pd error:&error];
+            nativePipeline = createRenderPipelineState(pd, &error);
             if (!nativePipeline)
             {
                 std::string message = "[nvrhi] Failed to create Metal render pipeline";
@@ -433,10 +433,7 @@ namespace nvrhi::metal3
             }
             applyFramebufferFormats(pd, fbinfo, desc.renderState.blendState);
             NSError* error = nil;
-            nativePipeline = [m_Context.device newRenderPipelineStateWithMeshDescriptor:pd
-                                                                               options:MTLPipelineOptionNone
-                                                                            reflection:nil
-                                                                                 error:&error];
+            nativePipeline = createMeshRenderPipelineState(pd, &error);
             if (!nativePipeline)
             {
                 std::string message = "[nvrhi] Failed to create Metal mesh render pipeline";

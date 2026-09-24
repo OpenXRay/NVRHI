@@ -988,6 +988,8 @@ namespace nvrhi::metal3
     public:
         explicit Device(const DeviceDesc& desc);
         ~Device() override;
+
+        bool serializePipelineArchive() override;
         
         // IResource impl
         Object getNativeObject(ObjectType objectType) override;
@@ -1159,6 +1161,17 @@ namespace nvrhi::metal3
         AftermathCrashDumpHelper m_AftermathCrashDumpHelper;
 
         MTL3Context m_Context;
+
+        id<MTLRenderPipelineState> createRenderPipelineState(MTLRenderPipelineDescriptor* descriptor, NSError** error);
+        id<MTLRenderPipelineState> createMeshRenderPipelineState(MTLMeshRenderPipelineDescriptor* descriptor, NSError** error);
+        id<MTLComputePipelineState> createComputePipelineState(MTLComputePipelineDescriptor* descriptor, NSError** error);
+        void createPipelineArchive();
+
+        std::string m_ShaderLibraryCacheDirectory;
+        std::string m_PipelineArchivePath;
+        id<MTLBinaryArchive> m_PipelineArchive = nil;
+        std::mutex m_PipelineArchiveMutex;
+        bool m_PipelineArchiveDirty = false;
 
         std::mutex m_Mutex;
     };

@@ -49,6 +49,7 @@ namespace nvrhi::metal3
         // add some metal backend specific functions functions if required
         // virtual id<MTLDevice> getNativeDevice() const = 0;
         // virtual id<MTLCommandQueue> getNativeCommandQueue(CommandQueue queue) const = 0;
+        virtual bool serializePipelineArchive() = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;
@@ -76,6 +77,9 @@ namespace nvrhi::metal3
 
         uint32_t maxTimerQueries = 256;
         bool logBufferLifetime = false;
+
+        const char* shaderLibraryCacheDirectory = nullptr;
+        const char* pipelineArchivePath = nullptr;
     };
 
     NVRHI_API DeviceHandle createDevice(const DeviceDesc& desc);

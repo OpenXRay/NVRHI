@@ -2,6 +2,7 @@
 #include <dispatch/dispatch.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -632,6 +633,451 @@ namespace nvrhi::metal3
         return true;
     }
 
+    constexpr uint32_t c_ShaderLibraryCacheFormatVersion = 1;
+    constexpr uint32_t c_ShaderLibraryCacheMagic = 0x334c544d;
+    constexpr char c_ShaderLibraryCacheSettings[] =
+        "metal-dxil;column-major;linear;vertex-fetch-stage-in;gpu-family-metal3;macos-14.0.0;ignore-root-signature;"
+        "global-root-signature;function-constants-none;framebuffer-fetch-none;sm6.6";
+
+    struct ShaderLibraryCacheHeader
+    {
+        uint32_t magic;
+        uint32_t version;
+        uint32_t stage;
+        uint32_t reserved;
+        uint64_t key;
+        uint64_t secondaryKey;
+        uint64_t dxilSize;
+        uint64_t metallibSize;
+        uint64_t metadataSize;
+    };
+
+    struct ShaderLibraryCacheMetadata
+    {
+        MscShaderReflection reflection;
+        MTLSize computeThreadsPerGroup = MTLSizeMake(1, 1, 1);
+        bool computeThreadsPerGroupValid = false;
+        std::string reflectedEntryName;
+    };
+
+    struct ShaderLibraryCacheWriter
+    {
+        std::vector<uint8_t> data;
+
+        void writeBytes(const void* bytes, size_t size)
+        {
+            const uint8_t* begin = static_cast<const uint8_t*>(bytes);
+            data.insert(data.end(), begin, begin + size);
+        }
+        void writeU8(uint8_t value) { data.push_back(value); }
+        void writeU32(uint32_t value) { writeBytes(&value, sizeof(value)); }
+        void writeU64(uint64_t value) { writeBytes(&value, sizeof(value)); }
+        void writeString(const std::string& value)
+        {
+            writeU32(uint32_t(value.size()));
+            writeBytes(value.data(), value.size());
+        }
+    };
+
+    struct ShaderLibraryCacheReader
+    {
+        const uint8_t* data;
+        size_t size;
+        size_t offset = 0;
+        bool ok = true;
+
+        ShaderLibraryCacheReader(const uint8_t* bytes, size_t byteCount)
+            : data(bytes), size(byteCount)
+        {
+        }
+
+        bool readBytes(void* out, size_t count)
+        {
+            if (!ok || count > size - offset)
+            {
+                ok = false;
+                return false;
+            }
+            std::memcpy(out, data + offset, count);
+            offset += count;
+            return true;
+        }
+
+        uint8_t readU8()
+        {
+            uint8_t value = 0;
+            readBytes(&value, sizeof(value));
+            return value;
+        }
+
+        uint32_t readU32()
+        {
+            uint32_t value = 0;
+            readBytes(&value, sizeof(value));
+            return value;
+        }
+
+        uint64_t readU64()
+        {
+            uint64_t value = 0;
+            readBytes(&value, sizeof(value));
+            return value;
+        }
+
+        bool readString(std::string& out)
+        {
+            const uint32_t length = readU32();
+            if (!ok || length > size - offset)
+            {
+                ok = false;
+                return false;
+            }
+            out.assign(reinterpret_cast<const char*>(data + offset), length);
+            offset += length;
+            return true;
+        }
+
+        size_t remaining() const { return ok ? size - offset : 0; }
+    };
+
+    static uint64_t hashFnv1a(const void* bytes, size_t size, uint64_t hash)
+    {
+        const uint8_t* values = static_cast<const uint8_t*>(bytes);
+        for (size_t i = 0; i < size; ++i)
+        {
+            hash ^= values[i];
+            hash *= 0x100000001b3ull;
+        }
+        return hash;
+    }
+
+    static uint64_t hashScramble(const void* bytes, size_t size, uint64_t hash)
+    {
+        const uint8_t* values = static_cast<const uint8_t*>(bytes);
+        for (size_t i = 0; i < size; ++i)
+        {
+            hash ^= uint64_t(values[i]) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash = (hash << 31) | (hash >> 33);
+            hash *= 0xff51afd7ed558ccdull;
+            hash ^= hash >> 29;
+        }
+        return hash;
+    }
+
+    static void computeShaderLibraryCacheKeys(const ShaderDesc& desc, const std::string& requestedEntryName,
+        const void* dxil, size_t dxilSize, uint64_t& outKey, uint64_t& outSecondaryKey)
+    {
+        const uint32_t formatVersion = c_ShaderLibraryCacheFormatVersion;
+        const uint32_t toolchainVersion[3] = { IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH };
+        const uint32_t stage = uint32_t(desc.shaderType);
+        const uint64_t sourceSize = uint64_t(dxilSize);
+
+        uint64_t key = hashFnv1a(&formatVersion, sizeof(formatVersion), 0xcbf29ce484222325ull);
+        key = hashFnv1a(toolchainVersion, sizeof(toolchainVersion), key);
+        key = hashFnv1a(c_ShaderLibraryCacheSettings, sizeof(c_ShaderLibraryCacheSettings) - 1, key);
+        key = hashFnv1a(&stage, sizeof(stage), key);
+        key = hashFnv1a(requestedEntryName.data(), requestedEntryName.size(), key);
+        key = hashFnv1a(&sourceSize, sizeof(sourceSize), key);
+        key = hashFnv1a(dxil, dxilSize, key);
+
+        uint64_t secondaryKey = hashScramble(&formatVersion, sizeof(formatVersion), 0x8ebc6af09c88c6e3ull);
+        secondaryKey = hashScramble(toolchainVersion, sizeof(toolchainVersion), secondaryKey);
+        secondaryKey = hashScramble(c_ShaderLibraryCacheSettings, sizeof(c_ShaderLibraryCacheSettings) - 1, secondaryKey);
+        secondaryKey = hashScramble(&stage, sizeof(stage), secondaryKey);
+        secondaryKey = hashScramble(requestedEntryName.data(), requestedEntryName.size(), secondaryKey);
+        secondaryKey = hashScramble(&sourceSize, sizeof(sourceSize), secondaryKey);
+        secondaryKey = hashScramble(dxil, dxilSize, secondaryKey);
+
+        outKey = key;
+        outSecondaryKey = secondaryKey;
+    }
+
+    static std::filesystem::path makeShaderLibraryCachePath(const std::string& directory, uint64_t key)
+    {
+        char name[32];
+        std::snprintf(name, sizeof(name), "%016llx.mtl3lib", static_cast<unsigned long long>(key));
+        return std::filesystem::path(directory) / name;
+    }
+
+    static void serializeShaderLibraryMetadata(const Shader& shader, const std::string& reflectedEntryName,
+        std::vector<uint8_t>& outMetadata)
+    {
+        ShaderLibraryCacheWriter writer;
+        writer.writeString(reflectedEntryName);
+        writer.writeU64(uint64_t(shader.computeThreadsPerGroup.width));
+        writer.writeU64(uint64_t(shader.computeThreadsPerGroup.height));
+        writer.writeU64(uint64_t(shader.computeThreadsPerGroup.depth));
+        writer.writeU8(shader.computeThreadsPerGroupValid ? 1 : 0);
+
+        const MscShaderReflection& reflection = shader.mscReflection;
+        writer.writeU8(reflection.valid ? 1 : 0);
+        writer.writeU8(reflection.needsFunctionConstants ? 1 : 0);
+        writer.writeU8(reflection.directlyIndexedResourceHeap ? 1 : 0);
+        writer.writeU8(reflection.directlyIndexedSamplerHeap ? 1 : 0);
+        writer.writeU32(reflection.resourceCount);
+        writer.writeU64(reflection.argumentBufferSize);
+        writer.writeU32(reflection.vertexOutputSizeInBytes);
+        writer.writeU32(reflection.maxInputPrimitivesPerMeshThreadgroup);
+        writer.writeU32(reflection.geometryInstanceCount);
+        writer.writeU32(reflection.maxPayloadSizeInBytes);
+        writer.writeString(reflection.shaderType);
+        writer.writeString(reflection.inputPrimitive);
+
+        writer.writeU32(uint32_t(reflection.topLevelArgumentBuffer.size()));
+        for (const MscArgumentBinding& binding : reflection.topLevelArgumentBuffer)
+        {
+            writer.writeU32(binding.index);
+            writer.writeU32(binding.slot);
+            writer.writeU32(binding.space);
+            writer.writeU8(uint8_t(binding.type));
+            writer.writeU32(binding.byteOffset);
+            writer.writeU64(binding.sizeBytes);
+            writer.writeU32(binding.tableIndex);
+        }
+
+        writer.writeU32(uint32_t(reflection.descriptorTables.size()));
+        for (const MscDescriptorTable& table : reflection.descriptorTables)
+        {
+            writer.writeU32(table.byteOffset);
+            writer.writeU32(table.descriptorCount);
+            writer.writeU32(table.slot);
+            writer.writeU32(table.space);
+            writer.writeU8(uint8_t(table.type));
+            writer.writeU32(table.layoutIndex);
+            writer.writeU32(table.descriptorOffset);
+        }
+
+        writer.writeU32(uint32_t(reflection.vertexInputAttributes.size()));
+        for (const auto& attribute : reflection.vertexInputAttributes)
+        {
+            writer.writeString(attribute.first);
+            writer.writeU32(attribute.second);
+        }
+
+        outMetadata = std::move(writer.data);
+    }
+
+    static bool deserializeShaderLibraryMetadata(ShaderLibraryCacheReader& reader, ShaderLibraryCacheMetadata& metadata)
+    {
+        if (!reader.readString(metadata.reflectedEntryName) || metadata.reflectedEntryName.empty())
+            return false;
+
+        const uint64_t width = reader.readU64();
+        const uint64_t height = reader.readU64();
+        const uint64_t depth = reader.readU64();
+        if (!reader.ok)
+            return false;
+        metadata.computeThreadsPerGroup = MTLSizeMake(NSUInteger(width), NSUInteger(height), NSUInteger(depth));
+        metadata.computeThreadsPerGroupValid = reader.readU8() != 0;
+
+        MscShaderReflection& reflection = metadata.reflection;
+        reflection.valid = reader.readU8() != 0;
+        reflection.needsFunctionConstants = reader.readU8() != 0;
+        reflection.directlyIndexedResourceHeap = reader.readU8() != 0;
+        reflection.directlyIndexedSamplerHeap = reader.readU8() != 0;
+        reflection.resourceCount = reader.readU32();
+        reflection.argumentBufferSize = reader.readU64();
+        reflection.vertexOutputSizeInBytes = reader.readU32();
+        reflection.maxInputPrimitivesPerMeshThreadgroup = reader.readU32();
+        reflection.geometryInstanceCount = reader.readU32();
+        reflection.maxPayloadSizeInBytes = reader.readU32();
+        if (!reader.readString(reflection.shaderType) || !reader.readString(reflection.inputPrimitive))
+            return false;
+
+        const uint32_t bindingCount = reader.readU32();
+        if (!reader.ok || bindingCount > reader.remaining() / 29)
+            return false;
+        reflection.topLevelArgumentBuffer.resize(bindingCount);
+        for (MscArgumentBinding& binding : reflection.topLevelArgumentBuffer)
+        {
+            binding.index = reader.readU32();
+            binding.slot = reader.readU32();
+            binding.space = reader.readU32();
+            const uint8_t type = reader.readU8();
+            if (type > uint8_t(MscArgumentType::Sampler))
+                return false;
+            binding.type = MscArgumentType(type);
+            binding.byteOffset = reader.readU32();
+            binding.sizeBytes = reader.readU64();
+            binding.tableIndex = reader.readU32();
+        }
+
+        const uint32_t tableCount = reader.readU32();
+        if (!reader.ok || tableCount > reader.remaining() / 25)
+            return false;
+        reflection.descriptorTables.resize(tableCount);
+        for (MscDescriptorTable& table : reflection.descriptorTables)
+        {
+            table.byteOffset = reader.readU32();
+            table.descriptorCount = reader.readU32();
+            table.slot = reader.readU32();
+            table.space = reader.readU32();
+            const uint8_t type = reader.readU8();
+            if (type > uint8_t(MscArgumentType::Sampler))
+                return false;
+            table.type = MscArgumentType(type);
+            table.layoutIndex = reader.readU32();
+            table.descriptorOffset = reader.readU32();
+        }
+
+        const uint32_t attributeCount = reader.readU32();
+        if (!reader.ok || attributeCount > reader.remaining() / 5)
+            return false;
+        for (uint32_t index = 0; index < attributeCount; ++index)
+        {
+            std::string name;
+            if (!reader.readString(name))
+                return false;
+            const uint32_t attributeIndex = reader.readU32();
+            reflection.vertexInputAttributes[name] = attributeIndex;
+        }
+
+        return reader.ok;
+    }
+
+    static bool readShaderLibraryCacheFile(const std::filesystem::path& path, std::vector<uint8_t>& outData)
+    {
+        std::error_code errorCode;
+        const auto fileSize = std::filesystem::file_size(path, errorCode);
+        if (errorCode || fileSize < sizeof(ShaderLibraryCacheHeader) || fileSize > (256ull << 20))
+            return false;
+
+        outData.resize(size_t(fileSize));
+        std::ifstream file(path, std::ios::binary);
+        if (!file)
+        {
+            outData.clear();
+            return false;
+        }
+        file.read(reinterpret_cast<char*>(outData.data()), std::streamsize(outData.size()));
+        if (!file)
+        {
+            outData.clear();
+            return false;
+        }
+        return true;
+    }
+
+    static bool loadShaderLibraryFromCache(const std::string& directory, const ShaderDesc& desc,
+        const std::string& requestedEntryName, const void* dxil, size_t dxilSize, Shader& shader,
+        std::string& reflectedEntryName, std::vector<uint8_t>& metallib)
+    {
+        if (directory.empty() || !dxil || dxilSize == 0)
+            return false;
+
+        uint64_t key = 0;
+        uint64_t secondaryKey = 0;
+        computeShaderLibraryCacheKeys(desc, requestedEntryName, dxil, dxilSize, key, secondaryKey);
+
+        const std::filesystem::path path = makeShaderLibraryCachePath(directory, key);
+        std::vector<uint8_t> fileData;
+        if (!readShaderLibraryCacheFile(path, fileData))
+            return false;
+
+        ShaderLibraryCacheHeader header{};
+        std::memcpy(&header, fileData.data(), sizeof(header));
+        if (header.magic != c_ShaderLibraryCacheMagic || header.version != c_ShaderLibraryCacheFormatVersion ||
+            header.key != key || header.secondaryKey != secondaryKey || header.stage != uint32_t(desc.shaderType) ||
+            header.dxilSize != uint64_t(dxilSize))
+            return false;
+
+        const size_t payloadSize = fileData.size() - sizeof(header);
+        if (header.metadataSize == 0 || header.metallibSize == 0 ||
+            header.metadataSize > payloadSize || header.metallibSize > payloadSize - header.metadataSize)
+            return false;
+
+        ShaderLibraryCacheReader reader(fileData.data() + sizeof(header), size_t(header.metadataSize));
+        ShaderLibraryCacheMetadata metadata;
+        if (!deserializeShaderLibraryMetadata(reader, metadata) || !reader.ok || reader.remaining() != 0)
+            return false;
+        if (!metadata.reflection.valid)
+            return false;
+
+        const uint8_t* metallibBegin = fileData.data() + sizeof(header) + header.metadataSize;
+        if (header.metallibSize < 8 || std::memcmp(metallibBegin, "MTLB", 4) != 0)
+            return false;
+        metallib.assign(metallibBegin, metallibBegin + header.metallibSize);
+
+        shader.mscReflection = std::move(metadata.reflection);
+        shader.computeThreadsPerGroup = metadata.computeThreadsPerGroup;
+        shader.computeThreadsPerGroupValid = metadata.computeThreadsPerGroupValid;
+        reflectedEntryName = metadata.reflectedEntryName;
+        return true;
+    }
+
+    static void removeShaderLibraryFromCache(const std::string& directory, const ShaderDesc& desc,
+        const std::string& requestedEntryName, const void* dxil, size_t dxilSize)
+    {
+        if (directory.empty() || !dxil || dxilSize == 0)
+            return;
+
+        uint64_t key = 0;
+        uint64_t secondaryKey = 0;
+        computeShaderLibraryCacheKeys(desc, requestedEntryName, dxil, dxilSize, key, secondaryKey);
+
+        std::error_code errorCode;
+        std::filesystem::remove(makeShaderLibraryCachePath(directory, key), errorCode);
+    }
+
+    static void storeShaderLibraryInCache(const MTL3Context& context, const std::string& directory, const ShaderDesc& desc,
+        const std::string& requestedEntryName, const std::string& reflectedEntryName, const Shader& shader,
+        const void* dxil, size_t dxilSize, const std::vector<uint8_t>& metallib)
+    {
+        if (directory.empty() || !dxil || dxilSize == 0 || metallib.empty())
+            return;
+
+        std::vector<uint8_t> metadata;
+        serializeShaderLibraryMetadata(shader, reflectedEntryName, metadata);
+        if (metadata.empty())
+            return;
+
+        uint64_t key = 0;
+        uint64_t secondaryKey = 0;
+        computeShaderLibraryCacheKeys(desc, requestedEntryName, dxil, dxilSize, key, secondaryKey);
+
+        ShaderLibraryCacheHeader header{};
+        header.magic = c_ShaderLibraryCacheMagic;
+        header.version = c_ShaderLibraryCacheFormatVersion;
+        header.stage = uint32_t(desc.shaderType);
+        header.key = key;
+        header.secondaryKey = secondaryKey;
+        header.dxilSize = uint64_t(dxilSize);
+        header.metallibSize = uint64_t(metallib.size());
+        header.metadataSize = uint64_t(metadata.size());
+
+        std::error_code errorCode;
+        const std::filesystem::path directoryPath(directory);
+        std::filesystem::create_directories(directoryPath, errorCode);
+
+        const std::filesystem::path path = makeShaderLibraryCachePath(directory, key);
+        std::filesystem::path temporaryPath = path;
+        temporaryPath += ".tmp";
+
+        {
+            std::ofstream file(temporaryPath, std::ios::binary | std::ios::trunc);
+            if (!file)
+                return;
+            file.write(reinterpret_cast<const char*>(&header), static_cast<std::streamsize>(sizeof(header)));
+            file.write(reinterpret_cast<const char*>(metadata.data()), std::streamsize(metadata.size()));
+            file.write(reinterpret_cast<const char*>(metallib.data()), std::streamsize(metallib.size()));
+            file.flush();
+            if (!file)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(temporaryPath, removeError);
+                return;
+            }
+        }
+
+        std::filesystem::rename(temporaryPath, path, errorCode);
+        if (errorCode)
+        {
+            context.warning("[metal3] failed to store the shader library cache entry '" + path.string() + "'");
+            std::error_code removeError;
+            std::filesystem::remove(temporaryPath, removeError);
+        }
+    }
+
     ShaderHandle Device::createShader(const ShaderDesc& d, const void* binary, size_t binarySize)
     {
         if (!binary || binarySize == 0)
@@ -641,41 +1087,87 @@ namespace nvrhi::metal3
         shader->desc = d;
         shader->bytecode.assign(static_cast<const uint8_t*>(binary), static_cast<const uint8_t*>(binary) + binarySize);
         const bool isDxil = binarySize >= 4 && std::memcmp(binary, "DXBC", 4) == 0;
-        std::string entryName = d.entryName.empty() ? "main" : d.entryName;
+        const void* source = binary;
+        const size_t sourceSize = binarySize;
+        const std::string requestedEntryName = d.entryName.empty() ? "main" : d.entryName;
+        std::string entryName = requestedEntryName;
         std::vector<uint8_t> metallib;
-        if (isDxil)
+        bool allowCache = true;
+        bool cacheUsed = false;
+
+        while (true)
         {
-            if (!convertDxilShader(m_Context, *shader, binary, binarySize, metallib, entryName))
+            const void* libraryData = source;
+            size_t libraryDataSize = sourceSize;
+            if (isDxil)
             {
+                std::string reflectedEntryName = entryName;
+                if (allowCache && loadShaderLibraryFromCache(m_ShaderLibraryCacheDirectory, d, requestedEntryName, source,
+                    sourceSize, *shader, reflectedEntryName, metallib))
+                {
+                    entryName = reflectedEntryName;
+                    cacheUsed = true;
+                }
+                else
+                {
+                    entryName = requestedEntryName;
+                    shader->mscReflection = MscShaderReflection();
+                    shader->computeThreadsPerGroup = MTLSizeMake(1, 1, 1);
+                    shader->computeThreadsPerGroupValid = false;
+                    if (!convertDxilShader(m_Context, *shader, source, sourceSize, metallib, entryName))
+                    {
+                        delete shader;
+                        return nullptr;
+                    }
+                    cacheUsed = false;
+                    storeShaderLibraryInCache(m_Context, m_ShaderLibraryCacheDirectory, d, requestedEntryName, entryName,
+                        *shader, source, sourceSize, metallib);
+                }
+                libraryData = metallib.data();
+                libraryDataSize = metallib.size();
+            }
+
+            dispatch_data_t data = dispatch_data_create(libraryData, libraryDataSize, dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+            NSError* error = nil;
+            shader->library = [m_Context.device newLibraryWithData:data error:&error];
+            if (!shader->library)
+            {
+                std::string message = "[nvrhi] Failed to load Metal library";
+                if (error)
+                    message += std::string(": ") + [[error localizedDescription] UTF8String];
+                if (cacheUsed)
+                {
+                    m_Context.warning(message + "; discarding the cached shader library for '" + d.debugName + "'");
+                    allowCache = false;
+                    cacheUsed = false;
+                    removeShaderLibraryFromCache(m_ShaderLibraryCacheDirectory, d, requestedEntryName, source, sourceSize);
+                    continue;
+                }
+                m_Context.error(message);
                 delete shader;
                 return nullptr;
             }
-            binary = metallib.data();
-            binarySize = metallib.size();
-        }
 
-        dispatch_data_t data = dispatch_data_create(binary, binarySize, dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        NSError* error = nil;
-        shader->library = [m_Context.device newLibraryWithData:data error:&error];
-        if (!shader->library)
-        {
-            std::string message = "[nvrhi] Failed to load Metal library";
-            if (error)
-                message += std::string(": ") + [[error localizedDescription] UTF8String];
-            m_Context.error(message);
-            delete shader;
-            return nullptr;
-        }
+            NSString* entry = [NSString stringWithUTF8String:entryName.c_str()];
+            shader->function = [shader->library newFunctionWithName:entry];
+            if (!shader->function)
+            {
+                NSString* objectEntry = [NSString stringWithFormat:@"%@.dxil_irconverter_object_shader", entry];
+                shader->function = [shader->library newFunctionWithName:objectEntry];
+            }
+            if (shader->function)
+                break;
 
-        NSString* entry = [NSString stringWithUTF8String:entryName.c_str()];
-        shader->function = [shader->library newFunctionWithName:entry];
-        if (!shader->function)
-        {
-            NSString* objectEntry = [NSString stringWithFormat:@"%@.dxil_irconverter_object_shader", entry];
-            shader->function = [shader->library newFunctionWithName:objectEntry];
-        }
-        if (!shader->function)
-        {
+            shader->library = nil;
+            if (cacheUsed)
+            {
+                m_Context.warning("[metal3] cached shader library for '" + d.debugName +
+                    "' has no entry point; discarding it");
+                allowCache = false;
+                cacheUsed = false;
+                removeShaderLibraryFromCache(m_ShaderLibraryCacheDirectory, d, requestedEntryName, source, sourceSize);
+                continue;
+            }
             m_Context.error("[nvrhi] Failed to find Metal shader entry: " + d.entryName);
             delete shader;
             return nullptr;

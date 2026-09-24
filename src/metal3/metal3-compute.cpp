@@ -9,7 +9,9 @@ namespace nvrhi::metal3
             return nullptr;
 
         NSError* error = nil;
-        id<MTLComputePipelineState> nativePipeline = [m_Context.device newComputePipelineStateWithFunction:cs->function error:&error];
+        MTLComputePipelineDescriptor* descriptor = [[MTLComputePipelineDescriptor alloc] init];
+        descriptor.computeFunction = cs->function;
+        id<MTLComputePipelineState> nativePipeline = createComputePipelineState(descriptor, &error);
         if (!nativePipeline)
         {
             std::string message = "[nvrhi] Failed to create Metal compute pipeline";

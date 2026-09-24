@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 
 namespace nvrhi::metal3
@@ -112,6 +113,11 @@ namespace nvrhi::metal3
         m_Context.logBufferLifetime = desc.logBufferLifetime;
         m_Context.messageCallback = desc.errorCB;
 
+        m_ShaderLibraryCacheDirectory = desc.shaderLibraryCacheDirectory ? desc.shaderLibraryCacheDirectory : "";
+        m_PipelineArchivePath = desc.pipelineArchivePath ? desc.pipelineArchivePath : "";
+        if (!m_PipelineArchivePath.empty())
+            createPipelineArchive();
+
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
         if (@available(macOS 26.0, iOS 26.0, *))
         {
@@ -141,6 +147,221 @@ namespace nvrhi::metal3
     Device::~Device()
     {
         waitForIdle();
+    }
+
+    void Device::createPipelineArchive()
+    {
+        if (@available(macOS 11.0, *))
+        {
+            NSError* error = nil;
+            std::error_code existsError;
+            if (std::filesystem::exists(std::filesystem::path(m_PipelineArchivePath), existsError) && !existsError)
+            {
+                MTLBinaryArchiveDescriptor* descriptor = [[MTLBinaryArchiveDescriptor alloc] init];
+                descriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:m_PipelineArchivePath.c_str()]];
+                m_PipelineArchive = [m_Context.device newBinaryArchiveWithDescriptor:descriptor error:&error];
+                if (!m_PipelineArchive)
+                {
+                    std::string message = "[metal3] failed to load the pipeline archive '" + m_PipelineArchivePath +
+                        "'; starting a new archive";
+                    if (error)
+                        message += std::string(": ") + [[error localizedDescription] UTF8String];
+                    m_Context.warning(message);
+                    std::error_code removeError;
+                    std::filesystem::remove(m_PipelineArchivePath, removeError);
+                }
+                else
+                {
+                    m_Context.info("[metal3] loaded the pipeline archive '" + m_PipelineArchivePath + "'");
+                    return;
+                }
+            }
+
+            MTLBinaryArchiveDescriptor* emptyDescriptor = [[MTLBinaryArchiveDescriptor alloc] init];
+            emptyDescriptor.url = nil;
+            m_PipelineArchive = [m_Context.device newBinaryArchiveWithDescriptor:emptyDescriptor error:&error];
+            if (!m_PipelineArchive)
+            {
+                std::string message = "[metal3] failed to create an empty pipeline archive";
+                if (error)
+                    message += std::string(": ") + [[error localizedDescription] UTF8String];
+                m_Context.warning(message);
+            }
+        }
+    }
+
+    bool Device::serializePipelineArchive()
+    {
+        std::lock_guard<std::mutex> lock(m_PipelineArchiveMutex);
+        if (!m_PipelineArchive || !m_PipelineArchiveDirty)
+            return true;
+        if (m_PipelineArchivePath.empty())
+            return false;
+
+        std::filesystem::path targetPath(m_PipelineArchivePath);
+        std::filesystem::path temporaryPath = targetPath;
+        temporaryPath += ".tmp";
+
+        std::error_code errorCode;
+        std::filesystem::create_directories(targetPath.parent_path(), errorCode);
+
+        NSString* path = [NSString stringWithUTF8String:temporaryPath.string().c_str()];
+        if (!path)
+            return false;
+
+        NSError* error = nil;
+        if (![m_PipelineArchive serializeToURL:[NSURL fileURLWithPath:path] error:&error])
+        {
+            std::string message = "[metal3] failed to write the pipeline archive '" + targetPath.string() + "'";
+            if (error)
+                message += std::string(": ") + [[error localizedDescription] UTF8String];
+            m_Context.error(message);
+            std::filesystem::remove(temporaryPath, errorCode);
+            return false;
+        }
+
+        std::filesystem::rename(temporaryPath, targetPath, errorCode);
+        if (errorCode)
+        {
+            m_Context.error("[metal3] failed to replace the pipeline archive '" + targetPath.string() + "'");
+            std::filesystem::remove(temporaryPath, errorCode);
+            return false;
+        }
+
+        m_PipelineArchiveDirty = false;
+        return true;
+    }
+
+    id<MTLRenderPipelineState> Device::createRenderPipelineState(MTLRenderPipelineDescriptor* descriptor, NSError** error)
+    {
+        std::lock_guard<std::mutex> lock(m_PipelineArchiveMutex);
+        if (m_PipelineArchive)
+        {
+            if (@available(macOS 11.0, *))
+            {
+                descriptor.binaryArchives = @[m_PipelineArchive];
+                if (error)
+                    *error = nil;
+                id<MTLRenderPipelineState> archived = [m_Context.device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                                      options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                                                   reflection:nil
+                                                                                                        error:error];
+                if (archived)
+                    return archived;
+            }
+        }
+
+        if (error)
+            *error = nil;
+        id<MTLRenderPipelineState> pipeline = [m_Context.device newRenderPipelineStateWithDescriptor:descriptor error:error];
+        if (!pipeline || !m_PipelineArchive)
+            return pipeline;
+
+        if (@available(macOS 11.0, *))
+        {
+            NSError* archiveError = nil;
+            if ([m_PipelineArchive addRenderPipelineFunctionsWithDescriptor:descriptor error:&archiveError])
+            {
+                m_PipelineArchiveDirty = true;
+            }
+            else if (archiveError)
+            {
+                m_Context.warning(std::string("[metal3] failed to add a render pipeline to the archive: ") +
+                    [[archiveError localizedDescription] UTF8String]);
+            }
+        }
+
+        return pipeline;
+    }
+
+    id<MTLRenderPipelineState> Device::createMeshRenderPipelineState(MTLMeshRenderPipelineDescriptor* descriptor, NSError** error)
+    {
+        std::lock_guard<std::mutex> lock(m_PipelineArchiveMutex);
+        if (m_PipelineArchive)
+        {
+            if (@available(macOS 15.0, *))
+            {
+                descriptor.binaryArchives = @[m_PipelineArchive];
+                if (error)
+                    *error = nil;
+                id<MTLRenderPipelineState> archived = [m_Context.device newRenderPipelineStateWithMeshDescriptor:descriptor
+                                                                                                          options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                                                       reflection:nil
+                                                                                                            error:error];
+                if (archived)
+                    return archived;
+            }
+        }
+
+        if (error)
+            *error = nil;
+        id<MTLRenderPipelineState> pipeline = [m_Context.device newRenderPipelineStateWithMeshDescriptor:descriptor
+                                                                                                   options:MTLPipelineOptionNone
+                                                                                                reflection:nil
+                                                                                                     error:error];
+        if (!pipeline || !m_PipelineArchive)
+            return pipeline;
+
+        if (@available(macOS 15.0, *))
+        {
+            NSError* archiveError = nil;
+            if ([m_PipelineArchive addMeshRenderPipelineFunctionsWithDescriptor:descriptor error:&archiveError])
+            {
+                m_PipelineArchiveDirty = true;
+            }
+            else if (archiveError)
+            {
+                m_Context.warning(std::string("[metal3] failed to add a mesh pipeline to the archive: ") +
+                    [[archiveError localizedDescription] UTF8String]);
+            }
+        }
+
+        return pipeline;
+    }
+
+    id<MTLComputePipelineState> Device::createComputePipelineState(MTLComputePipelineDescriptor* descriptor, NSError** error)
+    {
+        std::lock_guard<std::mutex> lock(m_PipelineArchiveMutex);
+        if (m_PipelineArchive)
+        {
+            if (@available(macOS 11.0, *))
+            {
+                descriptor.binaryArchives = @[m_PipelineArchive];
+                if (error)
+                    *error = nil;
+                id<MTLComputePipelineState> archived = [m_Context.device newComputePipelineStateWithDescriptor:descriptor
+                                                                                                         options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                                                      reflection:nil
+                                                                                                           error:error];
+                if (archived)
+                    return archived;
+            }
+        }
+
+        if (error)
+            *error = nil;
+        id<MTLComputePipelineState> pipeline = [m_Context.device newComputePipelineStateWithDescriptor:descriptor
+                                                                                                 options:MTLPipelineOptionNone
+                                                                                              reflection:nil
+                                                                                                   error:error];
+        if (!pipeline || !m_PipelineArchive)
+            return pipeline;
+
+        if (@available(macOS 11.0, *))
+        {
+            NSError* archiveError = nil;
+            if ([m_PipelineArchive addComputePipelineFunctionsWithDescriptor:descriptor error:&archiveError])
+            {
+                m_PipelineArchiveDirty = true;
+            }
+            else if (archiveError)
+            {
+                m_Context.warning(std::string("[metal3] failed to add a compute pipeline to the archive: ") +
+                    [[archiveError localizedDescription] UTF8String]);
+            }
+        }
+
+        return pipeline;
     }
 
     Object Device::getNativeObject(ObjectType objectType)
