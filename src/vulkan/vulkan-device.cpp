@@ -21,8 +21,10 @@
 */
 
 #include "vulkan-backend.h"
+#include <cstring>
 #include <unordered_map>
 #include <sstream>
+#include <vector>
 
 #include <nvrhi/common/misc.h>
 
@@ -33,6 +35,25 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace nvrhi::vulkan
 {
+    static bool isCompatiblePipelineCacheData(const DeviceDesc& desc, const vk::PhysicalDeviceProperties& properties)
+    {
+        if (!desc.pipelineCacheData || desc.pipelineCacheDataSize < sizeof(VkPipelineCacheHeaderVersionOne))
+            return false;
+
+        VkPipelineCacheHeaderVersionOne header{};
+        std::memcpy(&header, desc.pipelineCacheData, sizeof(header));
+        if (header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE)
+            return false;
+        if (header.headerSize < sizeof(VkPipelineCacheHeaderVersionOne))
+            return false;
+        if (header.vendorID != properties.vendorID || header.deviceID != properties.deviceID)
+            return false;
+        if (std::memcmp(header.pipelineCacheUUID, properties.pipelineCacheUUID.data(), VK_UUID_SIZE) != 0)
+            return false;
+
+        return true;
+    }
+
     DeviceHandle createDevice(const DeviceDesc& desc)
     {
 #if defined(NVRHI_SHARED_LIBRARY_BUILD)
@@ -248,10 +269,34 @@ namespace nvrhi::vulkan
             m_Context.warning("Opacity micro-maps are not currently supported by RTXMU.");
         }
 #endif
+        std::vector<uint8_t> pipelineCacheData;
+        if (isCompatiblePipelineCacheData(desc, m_Context.physicalDeviceProperties))
+        {
+            const uint8_t* initialData = static_cast<const uint8_t*>(desc.pipelineCacheData);
+            pipelineCacheData.assign(initialData, initialData + desc.pipelineCacheDataSize);
+        }
+
         auto pipelineInfo = vk::PipelineCacheCreateInfo();
+        if (!pipelineCacheData.empty())
+        {
+            pipelineInfo.setInitialDataSize(pipelineCacheData.size());
+            pipelineInfo.setPInitialData(pipelineCacheData.data());
+        }
         vk::Result res = m_Context.device.createPipelineCache(&pipelineInfo,
             m_Context.allocationCallbacks,
             &m_Context.pipelineCache);
+
+        if (res != vk::Result::eSuccess && !pipelineCacheData.empty())
+        {
+            m_Context.warning("Failed to create the pipeline cache from the cached data, starting an empty pipeline cache");
+            pipelineCacheData.clear();
+            m_Context.pipelineCache = vk::PipelineCache();
+            pipelineInfo.setInitialDataSize(0);
+            pipelineInfo.setPInitialData(nullptr);
+            res = m_Context.device.createPipelineCache(&pipelineInfo,
+                m_Context.allocationCallbacks,
+                &m_Context.pipelineCache);
+        }
 
         if (res != vk::Result::eSuccess)
         {
@@ -295,6 +340,35 @@ namespace nvrhi::vulkan
             m_Context.device.destroyDescriptorSetLayout(m_Context.emptyDescriptorSetLayout);
             m_Context.emptyDescriptorSetLayout = vk::DescriptorSetLayout();
         }
+    }
+
+    bool Device::getPipelineCacheData(std::vector<uint8_t>& outData)
+    {
+        outData.clear();
+        if (!m_Context.pipelineCache)
+            return false;
+
+        size_t dataSize = 0;
+        vk::Result result = m_Context.device.getPipelineCacheData(m_Context.pipelineCache, &dataSize, nullptr);
+        if (result != vk::Result::eSuccess || dataSize == 0)
+            return false;
+
+        outData.resize(dataSize);
+        result = m_Context.device.getPipelineCacheData(m_Context.pipelineCache, &dataSize, outData.data());
+        if (result != vk::Result::eSuccess)
+        {
+            outData.clear();
+            return false;
+        }
+
+        outData.resize(dataSize);
+        if (outData.empty())
+        {
+            outData.clear();
+            return false;
+        }
+
+        return true;
     }
 
     Object Device::getNativeObject(ObjectType objectType)

@@ -24,6 +24,8 @@
 
 #include <vulkan/vulkan.h>
 #include <nvrhi/nvrhi.h>
+#include <cstddef>
+#include <vector>
 
 namespace nvrhi 
 {
@@ -43,6 +45,7 @@ namespace nvrhi::vulkan
         virtual void queueWaitForSemaphore(CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value) = 0;
         virtual void queueSignalSemaphore(CommandQueue executionQueue, VkSemaphore semaphore, uint64_t value) = 0;
         virtual uint64_t queueGetCompletedInstance(CommandQueue queue) = 0;
+        virtual bool getPipelineCacheData(std::vector<uint8_t>& outData) = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;
@@ -81,6 +84,9 @@ namespace nvrhi::vulkan
         bool descriptorBindingUniformBufferUpdateAfterBind = false;
         bool aftermathEnabled = false;
         bool logBufferLifetime = false;
+
+        const void* pipelineCacheData = nullptr;
+        size_t pipelineCacheDataSize = 0;
 
         std::string vulkanLibraryName; // if empty, use default
     };
