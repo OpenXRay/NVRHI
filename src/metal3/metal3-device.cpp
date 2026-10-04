@@ -909,6 +909,8 @@ namespace nvrhi::metal3
             return MTLPixelFormatR8Unorm;
         case Format::RG8_UNORM:
             return MTLPixelFormatRG8Unorm;
+        case Format::R16_UINT:
+            return MTLPixelFormatR16Uint;
         case Format::R32_UINT:
             return MTLPixelFormatR32Uint;
         case Format::R16_FLOAT:
@@ -919,6 +921,8 @@ namespace nvrhi::metal3
             return MTLPixelFormatRGBA16Float;
         case Format::RGBA16_UNORM:
             return MTLPixelFormatRGBA16Unorm;
+        case Format::R11G11B10_FLOAT:
+            return MTLPixelFormatRG11B10Float;
         case Format::R32_FLOAT:
             return MTLPixelFormatR32Float;
         case Format::RG32_FLOAT:
@@ -1115,12 +1119,13 @@ namespace nvrhi::metal3
         support = support | FormatSupport::Texture | FormatSupport::ShaderLoad;
         const bool float32 = format == Format::R32_FLOAT || format == Format::RG32_FLOAT
             || format == Format::RGBA32_FLOAT || format == Format::D32 || format == Format::D32S8;
-        if (format != Format::R32_UINT && (!float32 || m_Context.device.supports32BitFloatFiltering))
+        const bool integer = format == Format::R16_UINT || format == Format::R32_UINT;
+        if (!integer && (!float32 || m_Context.device.supports32BitFloatFiltering))
             support = support | FormatSupport::ShaderSample;
         if (info.hasDepth || info.hasStencil)
             return support | FormatSupport::DepthStencil;
         support = support | FormatSupport::RenderTarget;
-        if (format != Format::R32_UINT)
+        if (!integer)
             support = support | FormatSupport::Blendable;
         if (!info.isSRGB)
             support = support | FormatSupport::Buffer;
@@ -1130,7 +1135,7 @@ namespace nvrhi::metal3
         if ((tier >= MTLReadWriteTextureTier1 && (format == Format::R32_UINT || format == Format::R32_FLOAT))
             || (tier >= MTLReadWriteTextureTier2 && (format == Format::RGBA8_UNORM
                 || format == Format::RGBA16_FLOAT || format == Format::RGBA32_FLOAT
-                || format == Format::R16_FLOAT || format == Format::R8_UNORM)))
+                || format == Format::R16_FLOAT || format == Format::R16_UINT || format == Format::R8_UNORM)))
             support = support | FormatSupport::ShaderUavLoad;
         return support;
     }
