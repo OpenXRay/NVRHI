@@ -181,6 +181,8 @@ if(NVRHI_WITH_DX12)
 endif()
 
 if (NVRHI_WITH_RTXMU)
+    include(FetchContent)
+
     get_target_property(RTXMU_VULKAN_INCLUDE_DIR ${nvrhi_vulkan_headers_target} INTERFACE_INCLUDE_DIRECTORIES)
 
     option(RTXMU_WITH_VULKAN "" ${NVRHI_WITH_VULKAN})
