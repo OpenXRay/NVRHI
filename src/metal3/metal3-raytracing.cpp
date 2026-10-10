@@ -1,6 +1,5 @@
 #include "metal3-backend.h"
 #include <Metal/Metal.h>
-#define IR_PRIVATE_IMPLEMENTATION
 #include <metal_irconverter_runtime/metal_irconverter_runtime.h>
 #include <metal_irconverter_runtime/ir_raytracing.h>
 #include <algorithm>
