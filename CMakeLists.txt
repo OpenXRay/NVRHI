@@ -511,7 +511,7 @@ if (NVRHI_WITH_METAL3)
     find_library(NVRHI_METAL_FRAMEWORK Metal REQUIRED)
     find_library(NVRHI_FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(NVRHI_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
-    set(NVRHI_METAL_SHADER_CONVERTER_ROOT "" CACHE PATH "Metal Shader Converter SDK prefix")
+    set(NVRHI_METAL_SHADER_CONVERTER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk/metal-shaderconverter" CACHE PATH "Metal Shader Converter SDK prefix")
     find_path(NVRHI_METAL_IRCONVERTER_RUNTIME_INCLUDE_DIR
         NAMES metal_irconverter_runtime/metal_irconverter_runtime.h
         HINTS "${NVRHI_METAL_SHADER_CONVERTER_ROOT}"
