@@ -1,0 +1,140 @@
+name: XRay package
+
+on:
+  push:
+    branches: [xray]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NVRHI_FLAGS: >-
+    -DNVRHI_BUILD_SHARED=OFF
+    -DNVRHI_INSTALL=ON
+    -DNVRHI_WITH_VALIDATION=ON
+    -DNVRHI_WITH_RTXMU=ON
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x86_64-release, runner: windows-latest,   config: Release, flags: "-G Ninja -DNVRHI_WITH_VULKAN=ON" }
+          - { name: windows-x86_64-debug,   runner: windows-latest,   config: Debug,   flags: "-G Ninja -DNVRHI_WITH_VULKAN=ON" }
+          - { name: linux-x86_64,           runner: ubuntu-22.04,     config: Release, flags: "-DNVRHI_WITH_VULKAN=ON" }
+          - { name: linux-aarch64,          runner: ubuntu-22.04-arm, config: Release, flags: "-DNVRHI_WITH_VULKAN=ON" }
+          - { name: linux-musl-x86_64,      runner: ubuntu-latest,    config: Release, flags: "-DNVRHI_WITH_VULKAN=ON", alpine: true }
+          - { name: macos-aarch64,          runner: macos-latest,     config: Release, flags: "-DNVRHI_WITH_VULKAN=OFF -DNVRHI_WITH_METAL3=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0", metal: true }
+          - { name: macos-x86_64,           runner: macos-15-intel,   config: Release, flags: "-DNVRHI_WITH_VULKAN=OFF -DNVRHI_WITH_METAL3=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0", metal: true }
+          - { name: freebsd-x86_64,         runner: ubuntu-latest,    config: Release, flags: "-DNVRHI_WITH_VULKAN=ON", vm: freebsd, vm-version: "14.3", install: "sudo env IGNORE_OSVERSION=yes pkg update && sudo env IGNORE_OSVERSION=yes pkg install -y cmake git" }
+          - { name: openbsd-x86_64,         runner: ubuntu-latest,    config: Release, flags: "-DNVRHI_WITH_VULKAN=ON", vm: openbsd, vm-version: "7.8",  install: "sudo pkg_add cmake git" }
+          - { name: netbsd-x86_64,          runner: ubuntu-latest,    config: Release, flags: "-DNVRHI_WITH_VULKAN=ON -DCMAKE_C_COMPILER=/usr/pkg/gcc14/bin/gcc -DCMAKE_CXX_COMPILER=/usr/pkg/gcc14/bin/g++", vm: netbsd, vm-version: "10.1", install: "sudo pkgin -y install cmake git-base gcc14" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Set up MSVC
+        if: startsWith(matrix.name, 'windows')
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Set up Alpine
+        if: matrix.alpine
+        uses: jirutka/setup-alpine@master
+        with:
+          branch: latest-stable
+          packages: build-base cmake git linux-headers
+
+      - name: Fetch DXC from the latest OpenXRay/slang package
+        if: matrix.metal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release list -R OpenXRay/slang --limit 1 --json tagName --jq '.[0].tagName')"
+          gh release download "$tag" -R OpenXRay/slang -p "slang-${{ matrix.name }}.zip" -O slang.zip
+          mkdir slang && (cd slang && cmake -E tar xf ../slang.zip)
+          echo "DXC_FLAGS=-DNVRHI_METAL_DXC_INCLUDE_DIR=$PWD/slang/dxc/include/dxc -DNVRHI_METAL_DXC_REFLECTION_INCLUDE_DIR=$PWD/slang/dxc/include/directx -DNVRHI_METAL_DXC_STUB_INCLUDE_DIR=$PWD/slang/dxc/include/wsl/stubs -DNVRHI_METAL_DXC_LIBRARY=$PWD/slang/lib/libdxcompiler.dylib" >> "$GITHUB_ENV"
+
+      - name: Build (host)
+        if: ${{ !matrix.alpine && !matrix.vm }}
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS $DXC_FLAGS ${{ matrix.flags }}
+          cmake --build build --config ${{ matrix.config }} --parallel 4
+          cmake --install build --config ${{ matrix.config }} --prefix pkg
+
+      - name: Build (Alpine)
+        if: matrix.alpine
+        shell: alpine.sh {0}
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS ${{ matrix.flags }}
+          cmake --build build --parallel 4
+          cmake --install build --prefix pkg
+
+      - name: Build (VM)
+        if: matrix.vm
+        uses: cross-platform-actions/action@v0.32.0
+        with:
+          operating_system: ${{ matrix.vm }}
+          architecture: x86_64
+          version: ${{ matrix.vm-version }}
+          cpu_count: 4
+          memory: 13G
+          environment_variables: NVRHI_FLAGS
+          run: |
+            ${{ matrix.install }}
+            cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS ${{ matrix.flags }}
+            cmake --build build --parallel 4
+            cmake --install build --prefix pkg
+
+      - name: Add RTXMU and third-party headers
+        run: |
+          for lib in $(find build -name 'rtxmu.lib' -o -name 'librtxmu.a'); do cp "$lib" pkg/lib/; done
+          vk="$(find build thirdparty -type d -path '*Vulkan-Headers*/include' -print -quit 2>/dev/null || true)"
+          [[ -n "$vk" ]] && cp -R "$vk/." pkg/include/
+          dx="$(find build thirdparty -type d -path '*DirectX-Headers*/include' -print -quit 2>/dev/null || true)"
+          [[ -n "$dx" && "${{ matrix.name }}" == windows-* ]] && cp -R "$dx/." pkg/include/
+          cp LICENSE.txt ThirdPartyLicenses.txt pkg/
+          if [[ "${{ matrix.metal }}" == true ]]; then
+            mkdir -p pkg/metal-shaderconverter
+            cp -R sdk/metal-shaderconverter/. pkg/metal-shaderconverter/
+          fi
+
+      - name: Archive
+        run: |
+          mkdir -p dist
+          (cd pkg && cmake -E tar cf "../dist/nvrhi-${{ matrix.name }}.zip" --format=zip .)
+          cmake -E tar tf "dist/nvrhi-${{ matrix.name }}.zip" | grep -vE '^include/(vulkan|vk_video|directx|dxguids|wsl)/'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvrhi-${{ matrix.name }}
+          path: dist/*.zip
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="xray-${GITHUB_SHA::10}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip --clobber
+          else
+            gh release create "$tag" dist/*.zip --target "$GITHUB_SHA" --title "$tag" --notes "NVRHI packages built from xray@${GITHUB_SHA}"
+          fi
