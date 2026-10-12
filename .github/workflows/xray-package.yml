@@ -66,17 +66,20 @@ jobs:
       - name: Build (host)
         if: ${{ !matrix.alpine && !matrix.vm }}
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS $DXC_FLAGS ${{ matrix.flags }}
+          prefix="$PWD/pkg"
+          if [[ "${{ matrix.name }}" == windows-* ]]; then prefix="$(cygpath -m "$PWD")/pkg"; else export CXXFLAGS="-include string"; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_INSTALL_PREFIX="$prefix" $NVRHI_FLAGS $DXC_FLAGS ${{ matrix.flags }}
           cmake --build build --config ${{ matrix.config }} --parallel 4
-          cmake --install build --config ${{ matrix.config }} --prefix pkg
+          cmake --install build --config ${{ matrix.config }}
 
       - name: Build (Alpine)
         if: matrix.alpine
         shell: alpine.sh {0}
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS ${{ matrix.flags }}
+          export CXXFLAGS="-include string"
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_INSTALL_PREFIX="$PWD/pkg" $NVRHI_FLAGS ${{ matrix.flags }}
           cmake --build build --parallel 4
-          cmake --install build --prefix pkg
+          cmake --install build
 
       - name: Build (VM)
         if: matrix.vm
@@ -90,9 +93,10 @@ jobs:
           environment_variables: NVRHI_FLAGS
           run: |
             ${{ matrix.install }}
-            cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} $NVRHI_FLAGS ${{ matrix.flags }}
+            export CXXFLAGS="-include string"
+            cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_INSTALL_PREFIX="$PWD/pkg" $NVRHI_FLAGS ${{ matrix.flags }}
             cmake --build build --parallel 4
-            cmake --install build --prefix pkg
+            cmake --install build
 
       - name: Add RTXMU and third-party headers
         run: |
